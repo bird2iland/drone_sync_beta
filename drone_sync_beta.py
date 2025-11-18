@@ -111,7 +111,13 @@ def scan_videos(cam_folder: Path):
 
 
 def ensure_bin(media_pool, root_folder, name: str):
-    subs = root_folder.GetSubFolders()
+    if root_folder is None:
+        return None
+    subs = None
+    try:
+        subs = root_folder.GetSubFolders()
+    except Exception:
+        subs = None
     if isinstance(subs, dict):
         for f in subs.values():
             try:
@@ -119,7 +125,26 @@ def ensure_bin(media_pool, root_folder, name: str):
                     return f
             except Exception:
                 continue
-    return media_pool.AddSubFolder(root_folder, name)
+    try:
+        media_pool.SetCurrentFolder(root_folder)
+    except Exception:
+        pass
+    created = media_pool.AddSubFolder(root_folder, name)
+    if created:
+        return created
+    # Fallback: re-scan
+    try:
+        subs = root_folder.GetSubFolders()
+        if isinstance(subs, dict):
+            for f in subs.values():
+                try:
+                    if f.GetName() == name:
+                        return f
+                except Exception:
+                    continue
+    except Exception:
+        pass
+    return None
 
 
 def get_or_create_timeline(project, media_pool, name: str):
@@ -195,6 +220,9 @@ def main():
     for cam_folder in chosen_cams:
         cam_id = cam_folder.name
         cam_bin = ensure_bin(media_pool, root, cam_id)
+        if cam_bin is None:
+            print(f'创建或获取机位文件夹失败: {cam_id}')
+            continue
         videos = scan_videos(cam_folder)
         group_by_date = {}
         for v in videos:
@@ -212,6 +240,9 @@ def main():
         for realdate, items in sorted(group_by_date.items()):
             date_bin = ensure_bin(media_pool, cam_bin, realdate)
             media_pool.SetCurrentFolder(date_bin)
+            if date_bin is None:
+                print(f'创建或获取日期文件夹失败: {cam_id}/{realdate}')
+                continue
             imported_items = []
             for v, srt, ts in items:
                 added = media_pool.ImportMedia([str(v)])
@@ -224,8 +255,27 @@ def main():
                 continue
             timeline.SetSetting('timelineFrameRate', str(fps))
             timeline.SetStartTimecode('00:00:00:00')
+            max_w, max_h = 0, 0
             clip_infos = []
             for item, v, srt, ts in imported_items:
+                try:
+                    res = item.GetClipProperty('Resolution')
+                    if isinstance(res, str):
+                        m = re.search(r"(\d{3,5})x(\d{3,5})", res)
+                        if m:
+                            w, h = int(m.group(1)), int(m.group(2))
+                            if w * h > max_w * max_h:
+                                max_w, max_h = w, h
+                    elif isinstance(res, dict):
+                        val = res.get('Resolution')
+                        if isinstance(val, str):
+                            m = re.search(r"(\d{3,5})x(\d{3,5})", val)
+                            if m:
+                                w, h = int(m.group(1)), int(m.group(2))
+                                if w * h > max_w * max_h:
+                                    max_w, max_h = w, h
+                except Exception:
+                    pass
                 record_frame = compute_record_frame(ts, fps)
                 duration = get_clip_duration_frames(srt, fps)
                 info = {
@@ -237,6 +287,13 @@ def main():
                     info['startFrame'] = 0
                     info['endFrame'] = duration
                 clip_infos.append(info)
+            if max_w > 0 and max_h > 0:
+                timeline.SetSetting('useCustomSettings', '1')
+                timeline.SetSetting('timelineResolutionWidth', str(max_w))
+                timeline.SetSetting('timelineResolutionHeight', str(max_h))
+                rw = timeline.GetSetting('timelineResolutionWidth')
+                rh = timeline.GetSetting('timelineResolutionHeight')
+                print(f"Timeline '{timeline_name}' 分辨率: {rw}x{rh}")
             clip_infos.sort(key=lambda x: x['recordFrame'])
             for info in clip_infos:
                 ok = media_pool.AppendToTimeline([info])
